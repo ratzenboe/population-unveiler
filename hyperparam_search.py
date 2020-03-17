@@ -18,16 +18,27 @@ from sklearn.utils import shuffle
 
 import argparse
 
-# Evaluation: MD computation
+
 def md(fit_data):
+    """
+    Mean distance between members and centroid of point cloud
+    :param fit_data: Data matrix, point cloud
+    :return: mean distance between centroid and points, centroid position
+    """
     com_tot = np.sum(fit_data)/fit_data.shape[0]
     dist_to_com = (fit_data-com_tot)
-    #md = np.sum(np.sqrt(np.square(dist_to_com).sum(axis=1)))/fit_data.shape[0]
-    md = np.median(np.sqrt(np.square(dist_to_com).sum(axis=1)))
+    md = np.sum(np.sqrt(np.square(dist_to_com).sum(axis=1)))/fit_data.shape[0]
     return md, com_tot
 
-# Important: in the original paper a pre-cut is applied, thus, to validate the velocity distribution we make the same cut when comparing the vel-distrs
+
+# Important: in the Meingast et al. (2019) paper a pre-cut is applied, thus, to validate the velocity distribution we make the same cut when comparing the vel-distrs
 def validate_velocity(df_train_vr, df_predict_vr):
+    """
+    Estimate the number of outliers (in df_predict_vr) outside the 3-sigma range in the three marginal velocity distributions
+    :param df_train_vr: Training data (pandas DataFrame) containing the 3 velocity features
+    :param df_predict_vr: Infered data points (pandas DataFrame) containing the 3 velocity features
+    :return: Average contamination fraction
+    """
     v_cyl_cols = ['vr_cylinder', 'vphi_cylinder', 'vz_cylinder']
     tot_nb = 0
     for col in v_cyl_cols:
@@ -37,8 +48,20 @@ def validate_velocity(df_train_vr, df_predict_vr):
         tot_nb += nb_outside/df_predict_vr.shape[0]
     return tot_nb/len(v_cyl_cols)
 
+
 def hyperparam_search(X_train, y_train, X_full, data, target, hyper_params, test_params, cut_meingast):
-    """Hyperparameter search in OCSVM"""
+    """
+    Hyperparameter search in OCSVM
+    :param X_train: training data set (pandas DataFrame) with which the OCSVM model is trained; shape: (n_samples, n_features)
+    :param y_train: target data set (numpy array with ones; shape: (n_samples,))
+    :param X_full: Data to infer membership of (pandas DataFrame)
+    :param data: data set combining training and prediction set (1st input parameter for 'validate_velocity' function)
+    :param target: full training data with additional featues compared to X_train (2nd input parameter for 'validate_velocity' function)
+    :param hyper_params: Hyper-parameters for OCSVM and search region
+    :param test_params: Validation parameters
+    :param cut_meingast: Source qualitiy filter described in Meingast et al. (2019) applied to the full data
+    :return: Accepted hyper-parameters and classifiers in the ensemble + stability(=y_pred)
+    """
     print_progress = False
 
     y_pred_all_summed = np.zeros(shape=(X_full.shape[0],), dtype=int)
@@ -130,14 +153,61 @@ def hyperparam_search(X_train, y_train, X_full, data, target, hyper_params, test
                                 c_pos_list.append(c_pos)
     return {'y_pred': y_pred_all_summed, 'nus': nu_accepted, 'gammas': gamma_accepted, 'c_pos': c_pos_list, 'clf_list': accepted_clf_list}
 
-def main():
-    # Load data
-    fpath = os.path.join(data_path, '300pc_training_data.pkl')
-    data = pd.read_pickle(fpath)
-    # Meingast cut
-    data['phot_bp_mean_mag_error'] = 2.5/math.log(10)* (1/data.phot_bp_mean_flux_over_error)
-    data['phot_rp_mean_mag_error'] = 2.5/math.log(10)* (1/data.phot_rp_mean_flux_over_error)
 
+def file_reader(fpath, contains_colums=None):
+    """
+    Read in data set as pandas data frame
+    :param fpath: Path to the data file
+    :param contains_colums: List of columns that have to be present in the data set
+    """
+    if fpath.endswith('.pkl'):
+        data = pd.read_pickle(fpath)
+
+    elif fpath.endswith('.csv'):
+        data = pd.read_csv(fpath)
+
+    elif fpath.endswith('.fits'):
+        data = Table.read(fpath).to_pandas()
+
+    else:
+        msg = """Currently supported input data formats include '.pkl', '.csv', and '.fits'.
+              If the data is stored in another format add the proper file importer function in the 'file_reader' function.
+              """
+        raise TypeError(msg)
+
+    # Check if the right columns are contained in the dataframe
+    if isinstance(contains_colums, list):
+        # If the input columns are not featured in the data we trow a KeyError
+        if not set(contains_colums) <= set(data.columns.tolist()):
+            msg = "The data set is missing at least one of the following columns {}".format(contains_colums)
+            raise KeyError(msg)
+
+    return data
+
+
+
+def main():
+    # Necessary columns
+    column_list = ['phot_bp_mean_mag', 'phot_bp_mean_flux_over_error',
+                   'phot_rp_mean_mag', 'phot_rp_mean_flux_over_error',
+                   'parallax', 'parallax_error', 'pmra', 'pmra_error',
+                   'pmdec', 'pmdec_error',
+                   'radial_velocity', 'radial_velocity_error',
+                   'astrometric_sigma5d_max']
+
+    # Load data
+    train_data = file_reader(fpath_train, contains_colums=column_list+pos_cols+vel_cols)
+    train_data['target'] = 0
+    # Data where we want to infer the group membership
+    predict_data = file_reader(fpath_predict, contains_colums=column_list+pos_cols+vel_cols)
+    predict_data['target'] = 1
+    # Full data (needed for radial velocity validation)
+    data = pd.concat([train_data, predict_data])
+
+    # Simple error propagation on the bp & rp errors (used in the next step)
+    data['phot_bp_mean_mag_error'] = 2.5/math.log(10)* (1/data['phot_bp_mean_flux_over_error'])
+    data['phot_rp_mean_mag_error'] = 2.5/math.log(10)* (1/data['phot_rp_mean_flux_over_error'])
+    # Source qualitiy filter defined in by Meingast et al. (2019)
     cut_px = np.abs(data['parallax_error']/data['parallax'])<0.5
     cut_pmra = data['pmra_error']/data['pmra']<0.5
     cut_pmdec = data['pmdec_error']/data['pmdec']<0.5
@@ -147,17 +217,19 @@ def main():
     cut_s5d = np.abs(data['astrometric_sigma5d_max'])<0.5
     cut_meingast = cut_px & cut_pmra & cut_s5d & cut_rp & cut_bp & cut_vr &cut_pmdec
 
-    # Target
-    target = data.loc[data.target==1]
-
-    # Hyperparameter search
-    hyper_params = {'n_searches': n_searches_per_process, 'k_folds': 10, 'kernel_list': ['rbf'], 'gamma_exponent_range': (-2, 1),  'nu_range': (0.01, 0.7), 'train_size': 0.8, 'c_pos_range': (cp_lo,cp_hi)}
+    # Define hyperparameter search parameters and ranges
+    hyper_params = {'n_searches': n_searches_per_process, 'k_folds': 10, 'kernel_list': ['rbf'],
+                    'gamma_exponent_range': (-2, 1),  'nu_range': (0.01, 0.7),
+                    'train_size': 0.8, 'c_pos_range': (cp_lo,cp_hi)}
     test_params = {'min_mean_acc': 0.5, 'max_std': 0.15, 'min_pts_full': 500, 'max_pts_full': max_pts_full,
-                   'md_margin_xyz': md_margin_pos, 'md_margin_pm': md_margin_vel, 'md_min_perc': 0.5, 'com_margin': com_margin, 'max_vr_overflow': 0.25}
+                   'md_margin_xyz': md_margin_pos, 'md_margin_pm': md_margin_vel, 'md_min_perc': 0.5,
+                   'com_margin': com_margin, 'max_vr_overflow': 0.25}
+
+    # Preprocessing
     train_cols = pos_cols + vel_cols
     # training data
-    X_train_stddev = target[train_cols].std()
-    X_train, y_train = target[train_cols]/X_train_stddev, np.ones(shape=(target.shape[0],))
+    X_train_stddev = train_data[train_cols].std()
+    X_train, y_train = train_data[train_cols]/X_train_stddev, np.ones(shape=(train_data.shape[0],))
     # Full data set
     X_full = data[train_cols]/X_train_stddev
     y_pred_all_summed = np.zeros(shape=(X_full.shape[0],), dtype=int)
@@ -168,7 +240,7 @@ def main():
     print('Starting hyperparameter search with {} processes...'.format(nb_processes))
     st = time.time()
     pool = multiprocessing.Pool(processes=nb_processes)
-    hyper_param_list = [pool.apply_async(hyperparam_search, (X_train, y_train, X_full, data, target, hyper_params, test_params, cut_meingast)) for i in range(nb_processes)]
+    hyper_param_list = [pool.apply_async(hyperparam_search, (X_train, y_train, X_full, data, train_data, hyper_params, test_params, cut_meingast)) for i in range(nb_processes)]
     pool.close()
     pool.join()
     hp_list = [hp_dic.get() for hp_dic in hyper_param_list]
@@ -197,9 +269,7 @@ def main():
 
 
 if __name__=='__main__':
-    # TODO: Change followin path variable to where the actual data lies
-    data_path = '/media/sebastian/Data/hp_search_data'
-
+    # Global defined (appear also in function)
     pos_cols = ['X', 'Y', 'Z']
     vel_cols = ['pmra', 'pmdec']
 
@@ -207,6 +277,7 @@ if __name__=='__main__':
     user_argv = None
     parser = argparse.ArgumentParser()
 
+    # Hyper-parameters
     parser.add_argument('--max_pts_full', help='int: maximum number of stream members (default: 5000)',
                         action='store', type=int, default=5000)
     parser.add_argument('--md_margin_vel', help='float: Minimum deviation difference (in percent) of the original to predicted stream members (default: 0.01)',
@@ -219,11 +290,19 @@ if __name__=='__main__':
                         action='store', type=float, default=0.1)
     parser.add_argument('--cp_hi', help='float: scaling factor multiplying the positional features against the proper motion variables (highest value)',
                         action='store', type=float, default=10)
-
+    # Number of search points parameters
     parser.add_argument('--n_searches', help='int: Number of hyper-parameters searched by single CPU (default: 1000 ~3h runtime)',
                         action='store', type=int, default=1000)
     parser.add_argument('--n_cores', help='int: Number of cores to run the program on',
                         action='store', type=int, default=20)
+    # Data and data storage
+    parser.add_argument('--fpath_train', help='str: Training data path',
+                        action='store', type=str)
+    parser.add_argument('--fpath_predict', help='str: Prediction data path',
+                        action='store', type=str)
+    parser.add_argument('--save_dir', help='str: Directory path to save the output files in',
+                        action='store', type=str, default='./')
+
 
     command_line_args = parser.parse_args(user_argv)
     max_pts_full = command_line_args.max_pts_full
@@ -235,5 +314,9 @@ if __name__=='__main__':
 
     n_searches_per_process = command_line_args.n_searches
     n_cores = command_line_args.n_cores
+
+    fpath_train = command_line_args.fpath_train
+    fpath_predict = command_line_args.fpath_predict
+    data_path = command_line_args.save_dir
 
     main()
