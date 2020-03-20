@@ -1,5 +1,5 @@
-# population-unveiler
-Bagging OCSVM for unveiling the full stellar population of stellar groups.
+# Uncover
+Bagging OCSVM for uncovering the full stellar population of stellar groups.
 
 Using a predefined training set and a sample of potential member stars, i.e. the prediction set, the script searches for viable OCSMV classifiers in a predefined hyper-parameter range. Classifiers which are judged to fulfill our prior assumtions about the distribution of sources in 5D are admitted to the classifier ensemble. The ensemble then infers the membership of unseen points and saves them in a file alongside the hyper-parameters and accepted models. For more details on the application of this method to the Meingast 1 stream where we uncovered about a factor 10 more sources see our [paper](https://arxiv.org/abs/2002.05728).
 
